@@ -1,12 +1,23 @@
+import os
+import shutil
+
 from elasticsearch import Elasticsearch, exceptions
 import json
 import time
-import pprint
+import nltk
+import write_to_csv as write
+import data_visualization as visualize
+from nltk.util import ngrams
+from nltk.corpus import stopwords
+from collections import Counter
+
+stop_words = stopwords.words('english')
 
 DOMAIN = "localhost"
 PORT = 9200
 
-tweets = []
+query_response = []
+all_tweets = []
 tweets_per_month = {}
 tweets_per_location = {}
 tweets_per_day = {}
@@ -20,7 +31,7 @@ def create_es_client():
     host = str(DOMAIN) + ":" + str(PORT)
 
     # declare an instance of the Elasticsearch library
-    client = Elasticsearch(host, timeout=30, max_retries=10, retry_on_timeout=True)
+    client = Elasticsearch(host, timeout=5000, max_retries=1000, retry_on_timeout=True)
 
     try:
         # use the JSON library's dump() method for indentation
@@ -85,70 +96,27 @@ def reckondevice(tweet):
         return '-'
 
 
-'''    
-def analyse(client, keyword):
-    # get all of the indices on the Elasticsearch cluster
-    all_indices = client.indices.get_alias("*")
+def get_date(timestamp):
+    # Sun Dec 01 08:56:40 +0000 2019
+    date = {}
+    t = timestamp.split(" ")
+    date['day'] = t[0]
+    date['month'] = t[1]
+    date['day_n'] = t[2]
+    date['hour'] = (t[3].split(":"))[0]
+    date['year'] = t[5]
 
-    # iterate over the list of Elasticsearch indices
-    for num, index in enumerate(all_indices):
-        response = text_filter_with_score(client, index, keyword)
-        tweets_in_index = response['hits']['hits']
-
-        # number of tweets per month
-        tweets_per_month[index] = response['hits']['total']['value']
-
-        for tweet in tweets_in_index:
-            user = tweet['_source']['user']
-            username = user['screen_name']
-            location = user['location']
-
-            if username in tweets_per_user:
-                tweets_per_user[username] += 1
-            else:
-                tweets_per_user[username] = 1
-
-            if location in tweets_per_location:
-                tweets_per_location[location] += 1
-            else:
-                tweets_per_location[location] = 1
-
-    print(tweets_per_user, json.dumps(tweets_per_user, indent=4))
-    print(tweets_per_location, json.dumps(tweets_per_location, indent=4))
-        print(dict_giorno_ora_num)
-        plt.bar(dict_giorno_ora_num.keys(), dict_giorno_ora_num.values(), color='y')
-        plt.show()
-    
-    
-        ## Convert ElasticSearch Response to pd data frame
-        tweets = Select.from_dict(tweets_data).to_pandas()
-    
-        print(tweets.head)
-        print("Tweets number: " + str(tweets.size))
-        start = time.time()
-    
-        # See the percentage of tweets from the initial set that are #retweets:
-        RT_tweets = tweets[tweets['retweeted_status'] == True]
-        print("The percentage of retweets is" + str({round(len(RT_tweets) / len(tweets) * 100)}) + "% of all the tweets")
-    
-        end = time.time()
-        print("Time to perform the query: " + str(end - start))
-    '''
+    return date
 
 
 def process_hour(timestamp):
     # Sun Dec 01 08:56:40 +0000 2019
-    t = timestamp.split(" ")
-    day = t[0]
-    month = t[1]
-    day_n = t[2]
-    hour = (t[3].split(":"))[0]
-    year = t[5]
+    date = get_date(timestamp)
 
-    key = month + " " + year
+    key = date['month'] + " " + date['year']
 
     # tweets per day
-    c_day = day + " " + day_n
+    c_day = date['day_n'] + " " + date['day']
     if key in tweets_per_day:
         if c_day in tweets_per_day[key]:
             tweets_per_day[key][c_day] += 1
@@ -158,6 +126,7 @@ def process_hour(timestamp):
         tweets_per_day[key] = {c_day: 1}
 
     # tweets per hour
+    hour = date['hour']
     if key in tweets_per_hour:
         if hour in tweets_per_hour[key]:
             tweets_per_hour[key][hour] += 1
@@ -166,22 +135,27 @@ def process_hour(timestamp):
     else:
         tweets_per_hour[key] = {hour: 1}
 
-    '''
-    #Save tweets per hours, per day
-    c_day = day + " " + day_n
-    if key not in tweets_per_hour_per_day:
-        tweets_per_hour_per_day[key] = {c_day: {hour: 1}}
-    else:
-        if c_day not in tweets_per_hour_per_day[key]:
-            tweets_per_hour_per_day[key] = {c_day: {hour: 1}}
-        else:
-            if hour not in tweets_per_hour_per_day[key][c_day]:
-                tweets_per_hour_per_day[key] = {c_day: {hour: 1}}
-            else:
+    if key in tweets_per_hour_per_day:
+        if c_day in tweets_per_hour_per_day[key]:
+            if hour in tweets_per_hour_per_day[key][c_day]:
                 tweets_per_hour_per_day[key][c_day][hour] += 1
-            
-    print(tweets_per_hour_per_day)
-    '''
+            else:
+                tweets_per_hour_per_day[key][c_day][hour] = 1
+        else:
+            tweets_per_hour_per_day[key][c_day] = {hour: 1}
+    else:
+        tweets_per_hour_per_day[key] = {c_day: {hour: 1}}
+
+
+def retweeted_perc(tweets):
+    start = time.time()
+
+    # See the percentage of tweets from the initial set that are #retweets:
+    RT_tweets = tweets[tweets['retweeted_status'] == True]
+    print("The percentage of retweets is" + str({round(len(RT_tweets) / len(tweets) * 100)}) + "% of all the tweets")
+
+    end = time.time()
+    print("Time to perform the query: " + str(end - start))
 
 
 def process_hits(hits, index):
@@ -209,36 +183,56 @@ def process_hits(hits, index):
         process_hour(created_at)
 
 
-def search(client, search_body):
+def get_text_and_date(hits):
+    for item in hits:
+        text_and_date = []
+        text = item['_source']['text']
+        date = item['_source']['created_at']
+
+        text_and_date.append(text)
+        text_and_date.append(date)
+
+        all_tweets.append(text_and_date)
+
+
+def search(client, search_body, query_num):
+    global query_response
     # get all of the indices on the Elasticsearch cluster
     all_indices = client.indices.get_alias("*")
 
     for num, index in enumerate(all_indices):
         if "all_" in index:
             continue
+        if "." in index:
+            continue
 
+        print("Index:" + index)
         resp = client.search(
             index=index,
             # doc_type="_doc",
-            scroll="2m",
+            scroll="30m",
             # search_type="scan",
             size=1000,
             body=search_body
         )
+
         scroll_id = resp['_scroll_id']
 
         scroll_size = len(resp['hits']['hits'])
 
-        # print("Scroll size:" + str(scroll_size))
-
         # Start scrolling
         while scroll_size > 0:
             "Scrolling..."
-
             # Before scroll, process current batch of hits
+            #if query_num == 1:
             process_hits(resp['hits']['hits'], index)
 
-            resp = client.scroll(scroll_id=scroll_id, scroll='2m')
+            #if query_num == 2:
+            get_text_and_date(resp['hits']['hits'])
+
+            resp = client.scroll(scroll_id=scroll_id, scroll='30m')
+
+            query_response.append(resp['hits']['hits'])
 
             # Update the scroll ID
             scroll_id = resp['_scroll_id']
@@ -257,7 +251,7 @@ def match_all(client):
     search(client, search_body)
 
 
-def filter_with_score(client, keyword):
+def filter_keyword(client, keyword, query_num):
     search_body = {
         "query": {
             "match": {
@@ -267,7 +261,18 @@ def filter_with_score(client, keyword):
             }
         }
     }
-    search(client, search_body)
+    search(client, search_body, query_num)
+
+
+def filter_phrase(client, phrase, query_num):
+    search_body = {
+        "query": {
+            "match_phrase": {
+                "text": phrase
+            }
+        }
+    }
+    search(client, search_body, query_num)
 
 
 def initialise_dicts(client):
@@ -277,28 +282,156 @@ def initialise_dicts(client):
         tweets_per_month[index] = 0
 
 
-def print_sorted_dict(d, limit=-1):
-    count = 0
-    if limit == -1:
-        for k in sorted(d, key=d.get, reverse=True):
-            if d[k] != 0:
-                print(k, d[k])
+def analyse_keyword(client, keyword, query_num):
+    k_list = keyword.split(" ")
+    if len(k_list) > 1:
+        print("Filtering phrase")
+        filter_phrase(client, keyword, query_num)
     else:
-        for k in sorted(d, key=d.get, reverse=True):
-            count += 1
-            if count > limit:
-                break
-            print(k, d[k])
+        print("Filtering keyword")
+        filter_keyword(client, keyword, query_num)
+
+def term_occurence(all_tweets, keyword, year, month, day, hour):
+    myfolder = "results/"
+
+    all_unigrams = []
+    all_bigrams = []
+    all_trigrams = []
+
+    n_words = 20
+
+    for item in all_tweets:
+        tweet = item[0]
+        tokens = nltk.word_tokenize(tweet)
+        # convert to lower case
+        tokens = [w.lower() for w in tokens]
+
+        # remove punctuation from each word
+        import string
+        table = str.maketrans('', '', string.punctuation)
+        stripped = [w.translate(table) for w in tokens]
+
+        # remove remaining tokens that are not alphabetic
+        words = [word for word in stripped if word.isalpha()]
+
+        # filter out stop words
+        words = [w for w in words if not w in stop_words]
+
+        all_unigrams.extend(ngrams(words, 1))
+        all_bigrams.extend(ngrams(words, 2))
+        all_trigrams.extend(ngrams(words, 3))
+
+    word_freq = Counter(all_unigrams)
+    common_words = word_freq.most_common(n_words)
+    filename = "unigrams" + ".csv"
+    write.list_to_csv(myfolder, common_words, filename, year, month, day, hour)
+
+    bigram_freq = Counter(all_bigrams)
+    common_bigrams = bigram_freq.most_common(n_words)
+    filename = "bigrams" + ".csv"
+    write.list_to_csv(myfolder, common_bigrams, filename, year, month, day, hour)
+
+    trigram_freq = Counter(all_trigrams)
+    common_trigrams = trigram_freq.most_common(n_words)
+    filename = "trigrams" + ".csv"
+    write.list_to_csv(myfolder, common_trigrams, filename, year, month, day, hour)
 
 
-def print_nested_dict(d):
-    for month, hours in d.items():
-        print("\n" + month)
+def filter_by_date(tweets, year_to_filter, month_to_filter=-1, day_to_filter=-1, hour_to_filter=-1):
+    filtered_tweets = []
+    for item in tweets:
+        date = get_date(item[1])
+        year = date['year']
+        month = date['month']
+        day_n = date['day_n']
+        hour = date['hour']
 
-        print(json.dumps(hours, indent=2, sort_keys=True))
+        y_append = 1
+        m_append = 1
+        d_append = 1
+        h_append = 1
+
+        if year_to_filter != -1 and year != year_to_filter:
+            y_append = 0
+
+        if month_to_filter != -1 and month != month_to_filter:
+            m_append = 0
+
+        if day_to_filter != -1 and day_n != day_to_filter:
+            d_append = 0
+
+        if hour_to_filter != -1 and hour != hour_to_filter:
+            h_append = 0
+
+        if y_append and m_append and d_append and h_append:
+            filtered_tweets.append(item)
+
+    return filtered_tweets
 
 
-def start_query(which_query, keyword=None):
+def term_occurence_over_time(keyword, year=-1, month=-1, day=-1, hour=-1):
+    global all_tweets
+    filtered_tweets = filter_by_date(all_tweets, year, month, day, hour)
+
+    print("Total tweets in the selected period: " + str(len(filtered_tweets)))
+    term_occurence(filtered_tweets, keyword, year, month, day, hour)
+
+def remove(path):
+    """ param <path> could either be relative or absolute. """
+    if os.path.isfile(path):
+        os.remove(path)  # remove the file
+    elif os.path.isdir(path):
+        shutil.rmtree(path)  # remove dir and all contains
+    else:
+        print("Dir not found")
+
+def write_results(keyword):
+    ## Get input ##
+    myfolder = "results/"
+
+    ## Try to delete the file ##
+    try:
+        remove(myfolder)
+        os.mkdir(myfolder)
+    except OSError as e:  ## if failed, report it back to the user ##
+        print("Error: %s - %s." % (e.filename, e.strerror))
+
+    write.sorted_dict(myfolder, "tweets_per_month", tweets_per_month, keyword)
+    write.sorted_dict(myfolder, "tweets_per_location", tweets_per_location, keyword)
+    write.sorted_dict(myfolder, "tweets_per user", tweets_per_user, keyword)
+    write.tweets_per_day(myfolder, tweets_per_day, keyword)
+    write.tweets_per_hour(myfolder, tweets_per_hour_per_day, keyword)
+
+
+def check_year(year):
+    if year == "n":
+        return -1
+    return year
+
+
+def check_month(month):
+    if month == "n":
+        return -1
+    return month
+
+
+def check_day(day):
+    if day == "n":
+        return -1
+    return day
+
+
+def check_hour(hour):
+    if hour == "n":
+        return -1
+    return hour
+
+
+def initialise_tweets():
+    global all_tweets
+    all_tweets = []
+
+def query_analyse(which_query, keyword=None):
     client = create_es_client()
 
     if client is not None:
@@ -306,24 +439,25 @@ def start_query(which_query, keyword=None):
         start_time = time.time()
 
         if which_query == "filter":
-            filter_with_score(client, keyword)
-            print("Month - #Tweets")
-            print_sorted_dict(tweets_per_month)
-            print("\n\n\n\nLocation - #Tweets")
-            print_sorted_dict(tweets_per_location, 10)
-            print("\n\n\n\n")
-            print("User - #Tweets")
-            print_sorted_dict(tweets_per_user, 10)
+            analyse_keyword(client, keyword, 1)
+            write_results(keyword)
 
-            print("\nDay - #Tweets")
-            print_nested_dict(tweets_per_day)
+        end_time = time.time()
+        print("\n\n\n\nQuery duration: " + str(end_time - start_time) + " seconds")
 
-            print("\nHour - #Tweets")
-            print_nested_dict(tweets_per_hour)
-            # print_nested_dict(tweets_per_hour_per_day)
+def query_occurence(keyword, year=-1, month=-1, day=-1, hour=-1):
+    client = create_es_client()
 
-        if which_query == "match all":
-            match_all(client)
+    if client is not None:
+        initialise_dicts(client)
+        start_time = time.time()
+        year = check_year(year)
+        month = check_month(month)
+        day = check_day(day)
+        hour = check_hour(hour)
+        initialise_tweets()
+        analyse_keyword(client, keyword, 2)
+        term_occurence_over_time(keyword, year, month, day, hour)
 
         end_time = time.time()
         print("\n\n\n\nQuery duration: " + str(end_time - start_time) + " seconds")

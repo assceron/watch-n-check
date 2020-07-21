@@ -6,11 +6,7 @@ import time
 
 from elasticsearch import Elasticsearch, helpers
 
-root_dir = 'D://twitter-data-2019'
-
-rem_dir = '/research/remote/isar/petabyte/users/damiano/fake-news/twitter-data-2019'
-
-folder_path = "D://2019-12-14"
+rem_dir = '/research/remote/isar/petabyte/users/damiano/fake-news/twitter-data-2020/'
 
 client = Elasticsearch("localhost:9200", timeout=30, max_retries=10, retry_on_timeout=True)
 
@@ -92,7 +88,6 @@ def index_file(docs, index):
         try:
             # convert the string to a dict object
             tweet = json.loads(doc)
-
             if not is_valid_tweet(tweet):
                 continue
 
@@ -127,9 +122,6 @@ def index_file(docs, index):
         bulk_index(tweets_data, index, num)
 
 
-start = time.time()
-
-
 def get_index_name(filename):
     name = filename.split(".")
     full_date = name[2].split("-")
@@ -139,11 +131,13 @@ def get_index_name(filename):
     return str(year) + "-" + str(month)
 
 
-for subdir, dirs, files in os.walk(root_dir):
+start = time.time()
+for subdir, dirs, files in os.walk(rem_dir):
     print("SUBDIR: " + subdir)
     for file in files:
         print("INDEXING FILE: " + file)
         with gzip.open(os.path.join(subdir, file), 'rb') as s_file:
+            # print(get_index_name(file))
             index_file(s_file, get_index_name(file))
             print("Total tweets:" + str(total_tweets))
 
